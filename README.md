@@ -2,6 +2,8 @@
 
 This repository documents a series of hands-on exercises demonstrating password cracking techniques against different hash types and services. The lab utilizes standard cybersecurity tools like John the Ripper, Hashcat, and Hydra to perform dictionary and brute-force attacks.
 
+Every exercise below is followed by a look at how to detect and respond to it from the defender's side.
+
 All exercises were performed in a secure, sandboxed virtual environment.
 
 ---
@@ -69,3 +71,62 @@ To perform a dictionary attack against a live FTP service to find valid login cr
 ### Evidence
 A screenshot showing the Hydra command, the brute-force process, and the discovered valid credentials (`service:service`) is included in this repository.
 *   *(See `ftp-hydra-bruteforce.png`)*
+
+---
+
+## From the Defender's Side
+
+Running these attacks myself made it clear what evidence each one leaves behind, and where the realistic chance to catch them is.
+
+### Linux Password Hash Cracking (John the Ripper)
+
+This attack requires the attacker to already have read access to `/etc/shadow`, so the real detection point is earlier than the cracking itself.
+
+**What to look for:**
+- File integrity monitoring (FIM) alerting on any read or access to `/etc/shadow` outside of expected system processes
+- Auditd rules watching for access to shadow files, which is a standard hardening baseline on Linux systems
+- Any new or modified user accounts around the same time, since extracting a hash is often paired with creating a backdoor account
+
+**A rule to write:**
+> Alert on any process other than the standard authentication stack reading `/etc/shadow`.
+
+**How to respond:** Treat this as a sign the attacker already has local access or a foothold. The password crack itself happens offline and leaves no network trace, so the access that got them the file is what I'd be investigating, not the cracking.
+
+### MD5 Hash Cracking (Hashcat)
+
+Hashcat ran locally against an already-obtained hash, so there's no network signature here either. The defensive angle is upstream: how did an MD5 hash end up crackable at all?
+
+**What to look for:**
+- Any system or application still using MD5 or other weak hashing algorithms for passwords, which is a finding worth flagging regardless of whether an attack happened
+- Password policy and hashing algorithm audits as part of regular vulnerability management
+
+**How to respond:** This one's really a hardening recommendation rather than an incident: migrate anything still using MD5/SHA1 for password storage to a modern algorithm like bcrypt or Argon2, which are deliberately slow and resist exactly this kind of offline cracking.
+
+### NTLM Hash Cracking (Online Rainbow Tables)
+
+This is the step I'd be most worried about seeing in a real environment, because NTLM being unsalted means a dumped hash is often cracked in seconds.
+
+**What to look for:**
+- Any use of tools like `pwdump` or similar credential-dumping utilities on an endpoint, which EDR products flag by default
+- Access to the SAM database outside normal system processes
+- The resulting cracked password being reused somewhere, which I'd check via credential-reuse detection if available
+
+**How to respond:** Treat SAM database access as a high-severity alert on its own, since it almost always means local admin access has already been achieved. I wouldn't wait to see if the hash gets cracked; I'd respond to the dump itself.
+
+### Brute-Forcing a Live Service (Hydra)
+
+This is the one exercise in this repo that's actually visible on the network as it happens, which makes it the most realistically detectable.
+
+**What to look for:**
+- A spike in failed login attempts to the FTP service from a single source IP in a short time window
+- Multiple different usernames being tried in sequence from the same source, which distinguishes a credential-stuffing or brute-force attempt from a user mistyping their password
+- The eventual successful login following a long run of failures from the same source
+
+**A rule to write:**
+> If a single source IP generates more than N failed FTP logins within T seconds, raise a "possible brute-force" alert; raise it to high severity if a successful login follows.
+
+**How to respond:** Block or rate-limit the source IP, and treat the account that succeeded as compromised: force a password reset and review what that account accessed afterward.
+
+### What to take from this
+
+Three of these four attacks happen entirely offline after the real compromise has already occurred, so cracking the hash isn't usually where the defender gets their chance. Getting better at catching this class of attack means focusing on the access that produces the hash in the first place: file access to shadow/SAM databases, credential-dumping tool usage, and privilege escalation. Only the live brute-force attempt is something a SIEM can realistically catch in the moment.
